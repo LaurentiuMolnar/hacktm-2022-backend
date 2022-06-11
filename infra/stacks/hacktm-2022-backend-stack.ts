@@ -6,7 +6,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-
+import * as iam from 'aws-cdk-lib/aws-iam';
 export class Hacktm2022BackendStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
@@ -31,12 +31,21 @@ export class Hacktm2022BackendStack extends Stack {
       writeCapacity: 1,
     });
 
+    table.addGlobalSecondaryIndex({
+      indexName: 'GSI1',
+      partitionKey: { name: 'GSI1_PK', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'GSI1_SK', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+      readCapacity: 1,
+      writeCapacity: 1,
+    });
+
     const usersLambda = new lambda.Function(this, 'users-endpoint', {
       memorySize: 512,
       timeout: Duration.seconds(30),
       runtime: lambda.Runtime.NODEJS_16_X,
       environment: {
-        TEST: 'asd',
+        TABLE_NAME: table.tableName,
       },
       functionName: 'usersFn',
       code: lambda.Code.fromAsset(path.resolve('dist/users')),
@@ -48,11 +57,13 @@ export class Hacktm2022BackendStack extends Stack {
       defaultIntegration: new apigw.LambdaIntegration(usersLambda),
       deploy: true,
       deployOptions: {
-        stageName: 'dev',
+        stageName: 'api',
       },
     });
 
     usersApi.root.addResource('users').addMethod('POST');
+
+    table.grantFullAccess(usersLambda);
 
     new CfnOutput(this, 'assetsBucketArn', {
       value: bucket.bucketArn,
