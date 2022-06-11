@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as fs from 'fs';
 
 import { Stack, StackProps, CfnOutput, Duration } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
@@ -6,7 +7,12 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as iam from 'aws-cdk-lib/aws-iam';
+
+const srcDir = path.resolve('src');
+const libDir = 'lib';
+
+const srcDirs = (fs.readdirSync(srcDir) ?? []).filter((dir) => dir !== libDir);
+
 export class Hacktm2022BackendStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
@@ -40,43 +46,36 @@ export class Hacktm2022BackendStack extends Stack {
       writeCapacity: 1,
     });
 
-    const usersLambda = new lambda.Function(this, 'users-endpoint', {
-      memorySize: 512,
+    const commonLambdaProps = {
+      memorySize: 1024,
       timeout: Duration.seconds(30),
       runtime: lambda.Runtime.NODEJS_16_X,
       environment: {
         TABLE_NAME: table.tableName,
       },
-      functionName: 'usersFn',
-      code: lambda.Code.fromAsset(path.resolve('dist/users')),
       handler: 'index.handler',
-    });
+    };
 
-    const usersApi = new apigw.RestApi(this, 'usersApi', {
-      restApiName: 'users-api',
-      defaultIntegration: new apigw.LambdaIntegration(usersLambda),
+    const api = new apigw.RestApi(this, 'usersApi', {
+      restApiName: 'reusy-api',
       deploy: true,
       deployOptions: {
         stageName: 'api',
       },
     });
 
-    usersApi.root.addResource('users').addMethod('POST');
+    for (const endpoint of srcDirs) {
+      const fn = new lambda.Function(this, `${endpoint}-endpoint`, {
+        ...commonLambdaProps,
+        functionName: `${endpoint}Fn`,
+        code: lambda.Code.fromAsset(path.resolve(`dist/${endpoint}`)),
+      });
 
-    table.grantFullAccess(usersLambda);
+      api.root
+        .addResource(endpoint)
+        .addMethod('POST', new apigw.LambdaIntegration(fn));
 
-    new CfnOutput(this, 'assetsBucketArn', {
-      value: bucket.bucketArn,
-      exportName: 'assetsBucketArn',
-    });
-
-    new CfnOutput(this, 'tableArn', {
-      value: table.tableArn,
-      exportName: 'tableArn',
-    });
-
-    new CfnOutput(this, 'usersApiEndpoint', {
-      value: usersApi.url,
-    });
+      table.grantFullAccess(fn);
+    }
   }
 }
