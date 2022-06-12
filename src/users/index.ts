@@ -1,66 +1,51 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { hashSync } from 'bcryptjs';
 import { EmailValidator } from 'commons-validator-js';
 import { DynamoDB } from 'aws-sdk';
 
-import { EntityType, makeUserAuthSK, makeUserPK } from '../lib';
-
-type CreateUserPayload = {
-  email: string;
-  password: string;
-  firstName: string;
-  lastName: string;
-  phone: string;
-};
-
-type DynamoUserProfile = {
-  Email: { S: string };
-  FirstName: { S: string };
-  LastName: { S: string };
-  Phone: { S: string };
-  CreatedAt: { S: string };
-  EntityType: { S: EntityType.UserProfile };
-  PK: { S: string };
-  SK: { S: string };
-};
-
-type DynamoUserAuth = {
-  Email: { S: string };
-  PasswordHash: { S: string };
-  EntityType: { S: EntityType.UserAuth };
-  PK: { S: string };
-  SK: { S: string };
-};
-
-function payloadToDynamoUserProfile(
-  payload: CreateUserPayload
-): DynamoUserProfile {
-  return {
-    Email: { S: payload.email },
-    PK: { S: makeUserPK(payload.email) },
-    SK: { S: makeUserPK(payload.email) },
-    FirstName: { S: payload.firstName },
-    LastName: { S: payload.lastName },
-    Phone: { S: payload.phone },
-    CreatedAt: { S: new Date().toISOString() },
-    EntityType: { S: EntityType.UserProfile },
-  };
-}
-
-function payloadToDynamoUserAuth(payload: CreateUserPayload): DynamoUserAuth {
-  const passwordHash = hashSync(payload.password);
-
-  return {
-    PK: { S: makeUserPK(payload.email) },
-    SK: { S: makeUserAuthSK(payload.email) },
-    EntityType: { S: EntityType.UserAuth },
-    Email: { S: payload.email },
-    PasswordHash: { S: passwordHash },
-  };
-}
+import {
+  makePostGSI1PK,
+  makeUserAuthSK,
+  makeUserPK,
+  makeUserProfileSK,
+} from '../lib';
+import {
+  CreateUserPayload,
+  dynamoProfileToHttpResponse,
+  DynamoUserProfile,
+  payloadToDynamoUserAuth,
+  payloadToDynamoUserProfile,
+  HttpUserProfile,
+} from './mappers';
+import { DynamoPost, dynamoToHttpPost, HttpPost } from '../posts/mappers';
 
 const validator = new EmailValidator();
 const dynamodb = new DynamoDB({ region: 'eu-central-1' });
+
+async function getProfileByEmail(
+  email: string
+): Promise<HttpUserProfile | null> {
+  const result = await dynamodb
+    .query({
+      TableName: process.env.TABLE_NAME ?? '',
+      KeyConditions: {
+        PK: {
+          AttributeValueList: [{ S: makeUserPK(email) }],
+          ComparisonOperator: 'EQ',
+        },
+        SK: {
+          ComparisonOperator: 'EQ',
+          AttributeValueList: [{ S: makeUserProfileSK(email) }],
+        },
+      },
+    })
+    .promise();
+
+  if (!result.Count || !result.Items?.length) {
+    return null;
+  }
+
+  return dynamoProfileToHttpResponse(result.Items[0] as DynamoUserProfile);
+}
 
 async function existingUser(email: string): Promise<boolean> {
   const result = await dynamodb
@@ -143,11 +128,89 @@ async function createUserHandler(
   }
 }
 
+async function getAuthUserHandler(
+  event: APIGatewayProxyEvent
+): Promise<APIGatewayProxyResult> {
+  const email = event?.requestContext?.authorizer?.['email'] ?? '';
+
+  const user = await getProfileByEmail(email);
+
+  if (!user) {
+    return {
+      statusCode: 404,
+      body: JSON.stringify({ message: 'No profile found for this user' }),
+    };
+  }
+
+  return {
+    statusCode: 200,
+    body: JSON.stringify(user),
+  };
+}
+
+async function getUserPosts(
+  event: APIGatewayProxyEvent
+): Promise<APIGatewayProxyResult> {
+  const email = event?.requestContext?.authorizer?.['email'] ?? '';
+
+  if (!process.env.TABLE_NAME) {
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ message: 'Missing TABLE_NAME' }),
+    };
+  }
+
+  const result = await dynamodb
+    .query({
+      TableName: process.env.TABLE_NAME,
+      IndexName: 'GSI1',
+      KeyConditionExpression: '#email = :email',
+      ExpressionAttributeNames: {
+        '#email': 'GSI1_PK',
+      },
+      ExpressionAttributeValues: {
+        ':email': { S: makePostGSI1PK(email) },
+      },
+      ScanIndexForward: false,
+      ProjectionExpression:
+        'PostId, AuthorName, ItemName, Description, LocationLat, LocationLng, CoverUrl, ImageUrls, TransportDetails, CreatedAt',
+    })
+    .promise();
+
+  return {
+    statusCode: 200,
+    body: JSON.stringify(
+      (result.Items as DynamoPost[])?.map(
+        (postData: DynamoPost): HttpPost => dynamoToHttpPost(postData)
+      ) ?? []
+    ),
+  };
+}
+
 export async function handler(
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> {
-  if (event.httpMethod.toLowerCase() === 'post') {
+  console.log({ event });
+
+  const method = event.httpMethod.toLowerCase();
+
+  if (method === 'post') {
     return await createUserHandler(event);
+  }
+
+  if (method === 'get') {
+    if (event.path.endsWith('/me')) {
+      return await getAuthUserHandler(event);
+    }
+
+    if (event.path.endsWith('/posts')) {
+      return await getUserPosts(event);
+    }
+
+    return {
+      statusCode: 403,
+      body: JSON.stringify({ message: 'Forbidden' }),
+    };
   }
 
   return {

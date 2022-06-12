@@ -3,7 +3,7 @@ import { DynamoDB } from 'aws-sdk';
 import { compare } from 'bcryptjs';
 import { sign } from 'jsonwebtoken';
 
-import { makeUserAuthSK, makeUserPK } from '../lib';
+import { makeUserPK } from '../lib';
 
 const JWT_SECRET = 'classified';
 const JWT_EXPIRY = '30d';
@@ -12,6 +12,11 @@ type LoginPayload = {
   email: string;
   password: string;
 };
+
+type QueryResult = [
+  { PasswordHash: { S: string } },
+  { FirstName: { S: string }; LastName: { S: string } }
+];
 
 const dynamodb = new DynamoDB({ region: 'eu-central-1' });
 
@@ -29,28 +34,45 @@ export async function handler(
     const { email, password }: LoginPayload = JSON.parse(event?.body ?? '');
 
     const result = await dynamodb
-      .getItem({
+      .query({
         TableName: process.env.TABLE_NAME,
-        Key: { PK: { S: makeUserPK(email) }, SK: { S: makeUserAuthSK(email) } },
-        AttributesToGet: ['PasswordHash'],
+        KeyConditionExpression: 'PK = :pk',
+        ExpressionAttributeValues: {
+          ':pk': { S: makeUserPK(email) },
+        },
+        ProjectionExpression: 'PasswordHash, FirstName, LastName',
       })
       .promise();
 
-    if (!result?.Item) {
+    if (!result?.Items?.length) {
       return {
         statusCode: 401,
         body: JSON.stringify({ message: 'Invalid credentials' }),
       };
     }
 
-    if (!(await compare(password, result.Item?.PasswordHash?.S ?? ''))) {
+    const [
+      {
+        PasswordHash: { S: passwordHash },
+      },
+      {
+        FirstName: { S: firstName },
+        LastName: { S: lastName },
+      },
+    ] = result.Items as QueryResult;
+
+    if (!(await compare(password, passwordHash))) {
       return {
         statusCode: 401,
         body: JSON.stringify({ message: 'Invalid credentials' }),
       };
     }
 
-    const accessToken = sign({ email }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
+    const accessToken = sign(
+      { email, fullName: `${firstName} ${lastName}` },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRY }
+    );
 
     return {
       statusCode: 200,
