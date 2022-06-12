@@ -1,5 +1,4 @@
 import * as path from 'path';
-import * as fs from 'fs';
 
 import { Stack, StackProps, Duration } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
@@ -7,7 +6,6 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as es from 'aws-cdk-lib/aws-opensearchservice';
 
 const authorizerDir = 'auth';
 
